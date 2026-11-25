@@ -1,0 +1,11 @@
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+backend/target/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
