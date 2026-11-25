@@ -20,6 +20,13 @@ public class GlobalExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(SystemBusyException.class)
+    public ProblemDetail handleBusy(SystemBusyException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
+        problem.setTitle("System busy");
+        return problem;
+    }
+
     @ExceptionHandler(NoImageAvailableException.class)
     public ProblemDetail handleNoImage(NoImageAvailableException e) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());

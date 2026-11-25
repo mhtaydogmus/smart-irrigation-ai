@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -13,6 +14,12 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------- #
 # Configuration (override with environment variables)
 # --------------------------------------------------------------------------- #
+SERVICE_DIR = Path(__file__).resolve().parent
+
+CAPTURE_MODE = os.getenv("CAPTURE_MODE", "FOLDER").strip().upper()
+TEST_IMAGES_DIR = Path(os.getenv("TEST_IMAGES_DIR", SERVICE_DIR.parent / "test-images")).resolve()
+MODEL_PATH = Path(os.getenv("MODEL_PATH", SERVICE_DIR / "models" / "best.pt")).resolve()
+
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 CAPTURE_WIDTH = int(os.getenv("CAPTURE_WIDTH", "1280"))
 CAPTURE_HEIGHT = int(os.getenv("CAPTURE_HEIGHT", "720"))
@@ -21,26 +28,71 @@ JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "85"))
 
 TARGET_WIDTH = 640
 TARGET_HEIGHT = 360
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
+if CAPTURE_MODE not in {"FOLDER", "CAMERA"}:
+    raise RuntimeError(f"Invalid CAPTURE_MODE '{CAPTURE_MODE}', expected FOLDER or CAMERA")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [edge-vision] %(message)s")
 log = logging.getLogger("edge-vision")
 
-app = FastAPI(title="Edge Vision Service", version="0.1.0")
+app = FastAPI(title="Edge Vision Service", version="0.2.0")
 
 _camera_lock = threading.Lock()
+_model_lock = threading.Lock()
+_model = None
 
 
 # --------------------------------------------------------------------------- #
-# Response contract ({JSON + Base64}) — mirrored by CaptureResponse.java
+# Request / response contract ({JSON + Base64}) — mirrored by CaptureResponse.java
 # --------------------------------------------------------------------------- #
+class CaptureRequest(BaseModel):
+    imagePath: str | None = None
+
+
 class CaptureResponse(BaseModel):
+    fileName: str
     stressDetected: bool
-    stressType: str | None
+    stressType: str
     confidence: float
+    inferenceSource: str
     imageBase64: str
     imageWidth: int
     imageHeight: int
     capturedAt: str
+
+
+# --------------------------------------------------------------------------- #
+# Folder: image file input
+# --------------------------------------------------------------------------- #
+def is_supported_image(path: Path) -> bool:
+    return path.is_file() and not path.name.startswith(".") and path.suffix.lower() in SUPPORTED_EXTENSIONS
+
+
+def find_latest_image() -> Path:
+    candidates = [p for p in TEST_IMAGES_DIR.iterdir() if is_supported_image(p)] if TEST_IMAGES_DIR.is_dir() else []
+    if not candidates:
+        raise HTTPException(status_code=404, detail=f"No .jpg/.jpeg/.png images found in {TEST_IMAGES_DIR}")
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def load_image_file(image_path: str | None) -> tuple[np.ndarray, str]:
+    if image_path:
+        path = Path(image_path).expanduser()
+        if not path.is_absolute():
+            path = TEST_IMAGES_DIR / path
+    else:
+        path = find_latest_image()
+
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Image not found: {path}")
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type '{path.suffix}', expected .jpg, .jpeg or .png")
+
+    frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=400, detail=f"Image could not be decoded: {path}")
+    return frame, path.name
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +119,9 @@ def capture_single_frame() -> np.ndarray:
             cap.release()
 
 
+# --------------------------------------------------------------------------- #
+# Preprocessing: 640x360 resize + JPEG Base64
+# --------------------------------------------------------------------------- #
 def resize_preserving_aspect(frame: np.ndarray) -> np.ndarray:
     h, w = frame.shape[:2]
     scale = min(TARGET_WIDTH / w, TARGET_HEIGHT / h)
@@ -90,44 +145,125 @@ def encode_jpeg_base64(frame: np.ndarray) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# AI inference: YOLO model (models/best.pt) with filename-based mock fallback
+# --------------------------------------------------------------------------- #
+MOCK_RULES = (
+    (("water", "dry"), "water_stress", 0.91),
+    (("potassium", "k_"), "potassium_deficiency", 0.87),
+    (("magnesium", "mg_"), "magnesium_deficiency", 0.85),
+    (("healthy",), "healthy", 0.96),
+)
+MOCK_DEFAULT = ("nitrogen_deficiency", 0.89)
+
+
+def get_model():
+    global _model
+    with _model_lock:
+        if _model is None and MODEL_PATH.is_file():
+            try:
+                from ultralytics import YOLO
+            except ImportError as exc:
+                raise HTTPException(
+                    status_code=500, detail="models/best.pt exists but 'ultralytics' is not installed",
+                ) from exc
+            _model = YOLO(str(MODEL_PATH))
+            log.info("Loaded YOLO model from %s", MODEL_PATH)
+        return _model
+
+
+def mock_inference(filename: str) -> dict:
+    name = filename.lower()
+    stress_type, confidence = next(
+        ((label, conf) for keywords, label, conf in MOCK_RULES if any(k in name for k in keywords)),
+        MOCK_DEFAULT,
+    )
+    return {
+        "stressDetected": stress_type != "healthy",
+        "stressType": stress_type,
+        "confidence": confidence,
+        "inferenceSource": "mock",
+    }
+
+
+def run_yolo_inference(image: np.ndarray, filename: str) -> dict:
+    model = get_model()
+    if model is None:
+        log.info("No model at %s, using mock inference for '%s'", MODEL_PATH, filename)
+        return mock_inference(filename)
+
+    result = model.predict(image, verbose=False)[0]
+    if getattr(result, "probs", None) is not None:
+        class_id = int(result.probs.top1)
+        confidence = float(result.probs.top1conf)
+    elif result.boxes is not None and len(result.boxes) > 0:
+        best = int(result.boxes.conf.argmax())
+        class_id = int(result.boxes.cls[best])
+        confidence = float(result.boxes.conf[best])
+    else:
+        return {"stressDetected": False, "stressType": "healthy", "confidence": 0.0, "inferenceSource": "model"}
+
+    stress_type = str(result.names[class_id]).strip().lower()
+    return {
+        "stressDetected": stress_type != "healthy",
+        "stressType": stress_type,
+        "confidence": round(confidence, 4),
+        "inferenceSource": "model",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 @app.post("/capture", response_model=CaptureResponse)
-def capture() -> CaptureResponse:
+def capture(request: CaptureRequest | None = None) -> CaptureResponse:
     started = time.perf_counter()
-    try:
-        frame = capture_single_frame()
-    except RuntimeError as exc:
-        log.error("Capture failed: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if CAPTURE_MODE == "CAMERA":
+        try:
+            frame = capture_single_frame()
+        except RuntimeError as exc:
+            log.error("Capture failed: %s", exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        file_name = f"camera-{CAMERA_INDEX}-snapshot.jpg"
+    else:
+        frame, file_name = load_image_file(request.imagePath if request else None)
 
     captured_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     resized = resize_preserving_aspect(frame)
+    detection = run_yolo_inference(resized, file_name)
     image_b64 = encode_jpeg_base64(resized)
 
     h, w = resized.shape[:2]
     log.info(
-        "Snapshot captured: native=%dx%d output=%dx%d base64=%d chars in %.0f ms",
-        frame.shape[1], frame.shape[0], w, h, len(image_b64), (time.perf_counter() - started) * 1000,
+        "[%s] %s: native=%dx%d output=%dx%d -> %s (%.2f, %s) in %.0f ms",
+        CAPTURE_MODE, file_name, frame.shape[1], frame.shape[0], w, h,
+        detection["stressType"], detection["confidence"], detection["inferenceSource"],
+        (time.perf_counter() - started) * 1000,
     )
 
     return CaptureResponse(
-        stressDetected=False,
-        stressType=None,
-        confidence=0.0,
+        fileName=file_name,
         imageBase64=image_b64,
         imageWidth=w,
         imageHeight=h,
         capturedAt=captured_at,
+        **detection,
     )
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "UP", "cameraIndex": CAMERA_INDEX}
+    return {
+        "status": "UP",
+        "captureMode": CAPTURE_MODE,
+        "testImagesDir": str(TEST_IMAGES_DIR),
+        "modelPresent": MODEL_PATH.is_file(),
+        "cameraIndex": CAMERA_INDEX,
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
 
+    log.info("Starting in %s mode (test images: %s)", CAPTURE_MODE, TEST_IMAGES_DIR)
     uvicorn.run("main:app", host="0.0.0.0", port=8000)

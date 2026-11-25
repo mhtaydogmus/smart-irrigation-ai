@@ -1,5 +1,7 @@
 package com.smartirrigation.backend.config;
 
+import java.net.http.HttpClient;
+
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
@@ -17,7 +19,9 @@ public class AiServiceClientConfig {
 
         return builder
                 .baseUrl(props.url())
-                .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(settings))
+                .requestFactory(ClientHttpRequestFactoryBuilder.jdk()
+                        .withHttpClientCustomizer(client -> client.version(HttpClient.Version.HTTP_1_1))
+                        .build(settings))
                 .build();
     }
 }
