@@ -1,5 +1,7 @@
 package com.smartirrigation.backend.service;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -15,12 +17,16 @@ public class DecisionEngineService {
 
     private static final Logger log = LoggerFactory.getLogger(DecisionEngineService.class);
 
-    private static final Map<String, Integer> DOSAGE_ML = Map.of(
-            "healthy", 0,
-            "water_stress", 100,
-            "nitrogen_deficiency", 50,
-            "potassium_deficiency", 40,
-            "magnesium_deficiency", 30);
+    private record Treatment(String diagnosis, int dosageMl, List<String> labels) {
+    }
+
+    private static final List<Treatment> TREATMENTS = List.of(
+            new Treatment("Healthy", 0, List.of("healthy")),
+            new Treatment("K (Potassium Deficiency)", 40, List.of("k", "potassium_deficiency", "potassium")),
+            new Treatment("Mg (Magnesium Deficiency)", 30, List.of("mg", "magnesium_deficiency", "magnesium")),
+            new Treatment("Fe (Iron Deficiency)", 30, List.of("fe", "iron_deficiency", "iron")));
+
+    private static final Map<String, Treatment> BY_LABEL = indexByLabel();
 
     private final double flowRateMlPerSec;
 
@@ -36,13 +42,19 @@ public class DecisionEngineService {
                 ? "unknown"
                 : stressType.trim().toLowerCase(Locale.ROOT);
 
-        Integer dosageMl = DOSAGE_ML.get(label);
-        if (dosageMl == null) {
-            log.warn("Unknown stress type '{}', no irrigation/nutrient action taken", label);
-            dosageMl = 0;
+        Treatment treatment = BY_LABEL.get(label);
+        if (treatment == null) {
+            log.warn("Unknown stress type '{}' (expected Healthy, K, Mg or Fe), no nutrient/irrigation action taken", label);
+            return new IrrigationDecision(label, "Unknown (" + label + ")", 0, 0);
         }
 
-        int valveSec = (int) Math.round(dosageMl / flowRateMlPerSec);
-        return new IrrigationDecision(label, dosageMl, valveSec);
+        int valveSec = (int) Math.ceil(treatment.dosageMl() / flowRateMlPerSec);
+        return new IrrigationDecision(label, treatment.diagnosis(), treatment.dosageMl(), valveSec);
+    }
+
+    private static Map<String, Treatment> indexByLabel() {
+        Map<String, Treatment> index = new HashMap<>();
+        TREATMENTS.forEach(t -> t.labels().forEach(label -> index.put(label, t)));
+        return Map.copyOf(index);
     }
 }

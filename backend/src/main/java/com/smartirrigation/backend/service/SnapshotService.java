@@ -88,6 +88,7 @@ public class SnapshotService {
                 capture.fileName(),
                 capture.stressDetected(),
                 decision.stressType(),
+                decision.diagnosis(),
                 capture.confidence(),
                 capture.inferenceSource(),
                 decision.dosageMl(),
@@ -108,8 +109,8 @@ public class SnapshotService {
             case PUBLISHED -> "[MQTT PUBLISHED] " + r.mqttPayload();
             case FAILED -> "[MQTT FAILED, broker unreachable] " + r.mqttPayload();
         };
-        String diagnosis = "%s (%.1f%% confidence, %s inference)".formatted(
-                r.stressType(), r.confidence() * 100, r.inferenceSource() == null ? "unknown" : r.inferenceSource());
+        String diagnosis = "%s [label: %s] (%.1f%% confidence, %s inference)".formatted(
+                r.diagnosis(), r.stressType(), r.confidence() * 100, r.inferenceSource() == null ? "unknown" : r.inferenceSource());
         String lock = released ? "BUSY -> IDLE" : "BUSY -> IDLE (already reset by failsafe)";
 
         log.info("""
@@ -121,7 +122,7 @@ public class SnapshotService {
                   File           : {}
                   AI Diagnosis   : {}
                   Stress         : {}
-                  Decision       : {} ml -> valve open {} sec
+                  Decision       : dosage_ml={} -> valve_sec={}
                   Action         : {}
                   Lock           : {}
                   Image          : {}x{}, {} KB, captured {}

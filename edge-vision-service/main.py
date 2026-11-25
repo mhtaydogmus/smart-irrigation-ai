@@ -1,6 +1,7 @@
 import base64
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -161,12 +162,12 @@ def encode_jpeg_base64(frame: np.ndarray) -> str:
 # AI inference: YOLO model (models/best.pt) with filename-based mock fallback
 # --------------------------------------------------------------------------- #
 MOCK_RULES = (
-    (("water", "dry"), "water_stress", 0.91),
-    (("potassium", "k_"), "potassium_deficiency", 0.87),
-    (("magnesium", "mg_"), "magnesium_deficiency", 0.85),
-    (("healthy",), "healthy", 0.96),
+    (("healthy",), (), "healthy", 0.96),
+    (("magnesium",), ("mg",), "mg", 0.85),
+    (("iron",), ("fe",), "fe", 0.88),
+    (("potassium",), ("k",), "k", 0.87),
 )
-MOCK_DEFAULT = ("nitrogen_deficiency", 0.89)
+MOCK_DEFAULT = ("healthy", 0.50)
 
 STRESS_LABELS = {"fe": "iron_deficiency", "mg": "magnesium_deficiency", "k": "potassium_deficiency"}
 
@@ -187,11 +188,16 @@ def get_model():
 
 
 def mock_inference(filename: str) -> dict:
-    name = filename.lower()
-    stress_type, confidence = next(
-        ((label, conf) for keywords, label, conf in MOCK_RULES if any(k in name for k in keywords)),
+    name = Path(filename).stem.lower()
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    class_name, confidence = next(
+        (
+            (label, conf) for words, codes, label, conf in MOCK_RULES
+            if any(w in name for w in words) or any(c in tokens for c in codes)
+        ),
         MOCK_DEFAULT,
     )
+    stress_type = STRESS_LABELS.get(class_name, class_name)
     return {
         "stressDetected": stress_type != "healthy",
         "stressType": stress_type,

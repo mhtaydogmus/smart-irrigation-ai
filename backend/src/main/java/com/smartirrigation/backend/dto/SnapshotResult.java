@@ -6,6 +6,7 @@ public record SnapshotResult(
         String fileName,
         boolean stressDetected,
         String stressType,
+        String diagnosis,
         double confidence,
         String inferenceSource,
         int dosageMl,

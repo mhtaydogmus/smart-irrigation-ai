@@ -6,5 +6,5 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 @ConfigurationProperties(prefix = "system.lock")
-public record SystemLockProperties(@DefaultValue("30s") Duration timeout) {
+public record SystemLockProperties(@DefaultValue("45s") Duration timeout) {
 }

@@ -9,5 +9,5 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record AiServiceProperties(
         String url,
         @DefaultValue("3s") Duration connectTimeout,
-        @DefaultValue("20s") Duration readTimeout) {
+        @DefaultValue("30s") Duration readTimeout) {
 }
