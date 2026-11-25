@@ -4,6 +4,8 @@
 .DS_Store
 
 backend/target/
+test-images/
+*.zip
 
 __pycache__/
 *.pyc

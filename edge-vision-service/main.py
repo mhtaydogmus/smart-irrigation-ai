@@ -11,6 +11,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+import zip_images
+
 # --------------------------------------------------------------------------- #
 # Configuration (override with environment variables)
 # --------------------------------------------------------------------------- #
@@ -19,6 +21,7 @@ SERVICE_DIR = Path(__file__).resolve().parent
 CAPTURE_MODE = os.getenv("CAPTURE_MODE", "FOLDER").strip().upper()
 TEST_IMAGES_DIR = Path(os.getenv("TEST_IMAGES_DIR", SERVICE_DIR.parent / "test-images")).resolve()
 MODEL_PATH = Path(os.getenv("MODEL_PATH", SERVICE_DIR / "models" / "best.pt")).resolve()
+TEST_IMAGES_ZIP = Path(os.getenv("TEST_IMAGES_ZIP", SERVICE_DIR.parent / "pepper-test.zip")).resolve()
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 CAPTURE_WIDTH = int(os.getenv("CAPTURE_WIDTH", "1280"))
@@ -81,8 +84,18 @@ def load_image_file(image_path: str | None) -> tuple[np.ndarray, str]:
         path = Path(image_path).expanduser()
         if not path.is_absolute():
             path = TEST_IMAGES_DIR / path
+        if not path.is_file():
+            zipped = zip_images.load(TEST_IMAGES_ZIP, path.name)
+            if zipped is not None:
+                return zipped
     else:
-        path = find_latest_image()
+        try:
+            path = find_latest_image()
+        except HTTPException:
+            zipped = zip_images.load(TEST_IMAGES_ZIP)
+            if zipped is not None:
+                return zipped
+            raise HTTPException(status_code=404, detail=f"No images in {TEST_IMAGES_DIR} and no usable ZIP at {TEST_IMAGES_ZIP}") from None
 
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"Image not found: {path}")
@@ -155,6 +168,8 @@ MOCK_RULES = (
 )
 MOCK_DEFAULT = ("nitrogen_deficiency", 0.89)
 
+STRESS_LABELS = {"fe": "iron_deficiency", "mg": "magnesium_deficiency", "k": "potassium_deficiency"}
+
 
 def get_model():
     global _model
@@ -188,7 +203,7 @@ def mock_inference(filename: str) -> dict:
 def run_yolo_inference(image: np.ndarray, filename: str) -> dict:
     model = get_model()
     if model is None:
-        log.info("No model at %s, using mock inference for '%s'", MODEL_PATH, filename)
+        log.warning("No model at %s, using mock inference for '%s'", MODEL_PATH, filename)
         return mock_inference(filename)
 
     result = model.predict(image, verbose=False)[0]
@@ -202,7 +217,8 @@ def run_yolo_inference(image: np.ndarray, filename: str) -> dict:
     else:
         return {"stressDetected": False, "stressType": "healthy", "confidence": 0.0, "inferenceSource": "model"}
 
-    stress_type = str(result.names[class_id]).strip().lower()
+    class_name = str(result.names[class_id]).strip().lower()
+    stress_type = STRESS_LABELS.get(class_name, class_name)
     return {
         "stressDetected": stress_type != "healthy",
         "stressType": stress_type,
@@ -259,6 +275,7 @@ def health() -> dict:
         "testImagesDir": str(TEST_IMAGES_DIR),
         "modelPresent": MODEL_PATH.is_file(),
         "cameraIndex": CAMERA_INDEX,
+        "testZipPresent": zip_images.image_names(TEST_IMAGES_ZIP) is not None,
     }
 
 
